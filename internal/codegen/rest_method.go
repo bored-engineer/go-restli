@@ -37,6 +37,9 @@ func (m *Method) restMethodFuncReturnParams(def *Group) {
 		def.Add(m.Return.PointerType())
 		def.Error()
 	case protocol.Method_create:
+		if m.EntityPathKey != nil && m.EntityPathKey.Type.Primitive != nil {
+			def.Add(m.EntityPathKey.Type.ReferencedType())
+		}
 		def.Error()
 	case protocol.Method_update:
 		def.Error()
@@ -96,21 +99,43 @@ func (r *Resource) generateCreate(m *Method) *Statement {
 	r.addClientFunc(def, m)
 
 	def.BlockFunc(func(def *Group) {
+		var returns []Code
+		// TODO: Support complex keys
+		entity := m.EntityPathKey != nil && m.EntityPathKey.Type.Primitive != nil
+		if entity {
+			returns = append(returns, m.EntityPathKey.Type.Nil())
+		}
+		returns = append(returns, Err())
+
 		m.callResourcePath(def)
-		IfErrReturn(def, Err()).Line()
+		IfErrReturn(def, returns...).Line()
 		r.callFormatQueryUrl(def)
-		IfErrReturn(def, Err()).Line()
+		IfErrReturn(def, returns...).Line()
 
 		def.List(Id(ReqVar), Err()).Op(":=").Id(ClientReceiver).Dot("JsonPostRequest").Call(Id(UrlVar), RestLiMethod(protocol.Method_create), Id(CreateParam))
-		IfErrReturn(def, Err()).Line()
+		IfErrReturn(def, returns...).Line()
 
-		def.List(Id(ResVar), Err()).Op(":=").Id(ClientReceiver).Dot(DoAndDecode).Call(Id(ReqVar), Id(CreateParam))
-		IfErrReturn(def, Err()).Line()
+		def.List(Id(ResVar), Err()).Op(":=").Id(ClientReceiver).Dot(DoAndIgnore).Call(Id(ReqVar))
+		IfErrReturn(def, returns...).Line()
 
 		def.If(Id(ResVar).Dot("StatusCode").Op("/").Lit(100).Op("!=").Lit(2)).BlockFunc(func(def *Group) {
-			def.Return(Qual("fmt", "Errorf").Call(Lit("Invalid response code from %s: %d"), Id(UrlVar), Id(ResVar).Dot("StatusCode")))
+			def.Err().Op("=").Qual("fmt", "Errorf").Call(Lit("Invalid response code from %s: %d"), Id(UrlVar), Id(ResVar).Dot("StatusCode"))
+			def.Return(returns...)
 		})
-		def.Return(Nil())
+		if entity {
+			def.Var().Id("createdID").Add(m.EntityPathKey.Type.GoType())
+			def.Id("createdStr").Op(":=").Id(ResVar).Dot("Header").Dot("Get").Call(Qual(ProtocolPackage, RestLiHeaderID))
+			assignment, hasError := m.EntityPathKey.Type.RestLiReducedDecodeModel(Id("createdStr"), Op("&").Id("createdID"))
+			if hasError {
+				def.Err().Op("=").Add(assignment)
+				IfErrReturn(def, returns...)
+			} else {
+				def.Add(assignment)
+			}
+			def.Return(Id("createdID"), Nil())
+		} else {
+			def.Return(Nil())
+		}
 	})
 
 	return def
